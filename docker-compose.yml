@@ -1,14 +1,53 @@
 services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-ekt}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   backend:
     build: ./backend
     ports: ["8000:8000"]
+    # Run as the host user so files written to backend/data stay editable outside Docker.
+    user: "${UID:-1000}:${GID:-1000}"
     env_file:
       - path: backend/.env
         required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-ekt}
+    extra_hosts:
+      # Lets the backend reach services on the host, e.g. a NIM behind `brev port-forward`.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # catalog.json and details_cache.sqlite: shared by the backend, sync-catalog and warm-cache.
+      - ./backend/data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: http://backend:8000
     ports: ["3000:3000"]
-    environment:
-      BACKEND_URL: http://backend:8000
-    depends_on: [backend]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
