@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Hackathon 2026",
-  description: "FastAPI + Next.js starter",
+  title: "Электрокомплект — ИИ-консультант",
+  description: "ИИ-ассистент для чата на сайте ekt.kz",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
