@@ -21,13 +21,21 @@ class Settings(BaseSettings):
     detail_timeout_seconds: float = 8
     analog_timeout_seconds: float = 4
 
-    # Any OpenAI-compatible API: OpenAI (default), build.nvidia.com, own NIM on Brev
+    # Main LLM (dialog + tools). Any OpenAI-compatible API: OpenAI (default),
+    # build.nvidia.com (Qwen), own NIM on Brev
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
     openai_model: str = "gpt-5.4-mini"
     openai_timeout_seconds: float = 30
     # For reasoning models (gpt-5*, o*): "minimal" / "low" keeps chat latency down.
     openai_reasoning_effort: str | None = None
+
+    # Hybrid mode: Kazakh model (Sherkala-8B via vLLM on Brev) rewrites replies to Kazakh
+    # questions. Empty base URL = off.
+    kazakh_llm_base_url: str = ""
+    kazakh_llm_api_key: str = "EMPTY"  # vLLM accepts any key unless started with --api-key
+    kazakh_llm_model: str = "inception42/Llama-3.1-Sherkala-8B-Chat"
+    kazakh_llm_timeout_seconds: float = 15
 
 
 settings = Settings()
