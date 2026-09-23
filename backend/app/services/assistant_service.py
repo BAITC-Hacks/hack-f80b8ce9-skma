@@ -18,9 +18,10 @@ from openai import OpenAIError
 
 from app.core.config import settings
 from app.schemas.cart import PendingAdd
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, SpecLine, UploadResponse
 from app.schemas.product import Analog, ProductCard
 from app.services.agent_graph import build_chat_graph, run_chat_graph
+from app.services.attachment_service import spec_context, summarize
 from app.services.cart_service import CartError, CartService, CartServiceDep
 from app.services.catalog_service import CatalogService, CatalogServiceDep
 from app.services.search_service import SearchService, SearchServiceDep
@@ -82,6 +83,7 @@ def money(value: float | None) -> str:
 @dataclass
 class Session:
     last_product_id: int | None = None
+    attachment_context: str = ""  # last uploaded spec, for the LLM's next turns
 
 
 class SessionStore:
@@ -148,6 +150,28 @@ class AssistantService:
             pending=turn.pending,
             cart_id=cart.id,
             cart_url=f"/cart/{cart.id}" if cart_state and cart_state.items else None,
+        )
+
+    async def attach(
+        self,
+        session_id: str,
+        cart_id: str | None,
+        filename: str,
+        lines: list[SpecLine],
+        skipped: int,
+    ) -> UploadResponse:
+        """Answer for an uploaded spec; its rows stay in the session for follow-up questions."""
+        cart = await self.carts.ensure(cart_id)
+        session = self.sessions.get(session_id)
+        session.attachment_context = spec_context(filename, lines)
+        cart_state = await self.carts.get(cart.id)
+        return UploadResponse(
+            reply=summarize(filename, lines, skipped),
+            cart_id=cart.id,
+            cart_url=f"/cart/{cart.id}" if cart_state and cart_state.items else None,
+            filename=filename,
+            spec=lines,
+            skipped_rows=skipped,
         )
 
     async def _confirm(self, cart_id: str, pending_id: str) -> str:
@@ -277,9 +301,14 @@ class AssistantService:
             await self.carts.reject(cart_id, pending_ids[-1])
             return REJECTED_TEXT
 
-        context = ""
+        context = session.attachment_context
+        if session.attachment_context:
+            context += (
+                "\nПозиции из спецификации добавляй в корзину по одной через "
+                "propose_add_to_cart: одновременно открыто только одно предложение."
+            )
         if session.last_product_id:
-            context = f"\n\nПоследний показанный товар: product_id={session.last_product_id}."
+            context += f"\n\nПоследний показанный товар: product_id={session.last_product_id}."
         graph = build_chat_graph(
             self.llm,
             self._tools(cart_id, turn),

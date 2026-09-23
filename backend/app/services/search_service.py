@@ -62,26 +62,56 @@ def looks_like_code(term: str) -> bool:
     return len(term) >= 5 and sum(c.isdigit() for c in term) >= 5
 
 
-# Main ratings in names: current "160А", power "10W", voltage "230V", size "25мм".
-RATING = re.compile(r"^\d+([.,]\d+)?(а|a|w|вт|в|v|мм|mm)$")
+# Cyrillic letters that look like Latin ones: "1Р+N" = "1P+N", "16А" = "16A".
+LOOKALIKES = str.maketrans("авсеохкмтрн", "abceoxkmtph")
+# Ratings in names: number + unit. Main ones (current, power, voltage) decide the analog.
+RATING = re.compile(r"^(\d+(?:[.,]\d+)?)(a|w|bt|b|v|mm|ma|ka)$")
+MAIN_UNITS = {"a", "w", "bt", "b", "v"}
+
+
+def fold(token: str) -> str:
+    return normalize(token).translate(LOOKALIKES)
 
 
 def name_values(name: str) -> dict[str, str]:
     """Values written in the name ("3ф", "160А", "18ka") without the leading product code:
-    normalized -> as written."""
+    folded -> as written."""
     tokens = name.split()[1:]
     return {
-        normalize(t): t
-        for t in tokens
-        if any(c.isdigit() for c in t) and len(t) <= 8 and "(" not in t
+        fold(t): t for t in tokens if any(c.isdigit() for c in t) and len(t) <= 8 and "(" not in t
     }
+
+
+def ratings(values: dict[str, str]) -> dict[str, str]:
+    """unit -> folded value, e.g. {"a": "16a", "ma": "30ma"}."""
+    return {m.group(2): key for key in values if (m := RATING.match(key))}
+
+
+def compare_names(
+    original: dict[str, str], candidate: dict[str, str]
+) -> tuple[int, list[str], list[str]]:
+    """How close the candidate's name values are: (score, shared values, differences).
+    A different main rating (10А instead of 16А) is a strong minus."""
+    shared_keys = sorted(original.keys() & candidate.keys())
+    score = 0
+    for key in shared_keys:
+        match = RATING.match(key)
+        score += (20 if match.group(2) in MAIN_UNITS else 12) if match else 8
+    differences = []
+    candidate_ratings = ratings(candidate)
+    for unit, key in ratings(original).items():
+        other = candidate_ratings.get(unit)
+        if other and other != key:
+            score -= 30 if unit in MAIN_UNITS else 10
+            differences.append(f"{candidate[other]} вместо {original[key]}")
+    return score, [candidate[k] for k in shared_keys], differences
 
 
 class SearchService:
     def __init__(self, catalog: CatalogService) -> None:
         self.catalog = catalog
 
-    def search(self, query: str, limit: int = 5) -> list[CatalogEntry]:
+    def search(self, query: str, limit: int = 5, min_score: int = 55) -> list[CatalogEntry]:
         entries = self.catalog.entries
         terms = query_terms(query)
         if not terms:
@@ -108,7 +138,7 @@ class SearchService:
             query_tokens = tokens(query)
             names = self.catalog.normalized_names
             candidates = process.extract(
-                query, names, scorer=fuzz.token_set_ratio, limit=200, score_cutoff=55
+                query, names, scorer=fuzz.token_set_ratio, limit=200, score_cutoff=min_score
             )
             candidates.sort(
                 key=lambda m: (overlap(query_tokens, m[0]), fuzz.token_sort_ratio(query, m[0])),
@@ -155,21 +185,31 @@ class SearchService:
             ]
             if len(pool) >= limit * 2:
                 break
-        if not pool:
-            return []
-
+        name = normalize(product.name)
         ranked = process.extract(
-            normalize(product.name),
-            {e.id: normalize(e.name) for e in pool},
-            scorer=fuzz.token_sort_ratio,
+            name, {e.id: normalize(e.name) for e in pool}, scorer=fuzz.token_sort_ratio,
             limit=candidates,
+        )  # fmt: skip
+        # Same product from another brand or series often sits in another catalog section:
+        # add the closest names from the whole catalog too.
+        in_pool = {e.id for e in pool} | {product.id}
+        nearby = process.extract(
+            name,
+            {i: n for i, n in self.catalog.normalized_names.items() if i not in in_pool},
+            scorer=fuzz.token_sort_ratio,
+            limit=5,
+            score_cutoff=75,
         )
+        ids = [product_id for _, _, product_id in [*ranked, *nearby]]
+        if not ids:
+            return []
         cards = await self.catalog.get_products(
-            [product_id for _, _, product_id in ranked],
+            ids,
             timeout=timeout or settings.analog_timeout_seconds,
         )
-        similarity = {product_id: score for _, score, product_id in ranked}
+        similarity = {product_id: score for _, score, product_id in [*ranked, *nearby]}
 
+        original_values = name_values(product.name)
         scored: list[tuple[float, Analog]] = []
         for card in cards:
             if not card.in_stock:
@@ -179,18 +219,24 @@ class SearchService:
                 for key, value in product.specs.items()
                 if key not in NOT_COMPARABLE and card.specs.get(key) == value
             ]
-            values = name_values(card.name)
-            shared_keys = sorted(name_values(product.name).keys() & values.keys())
-            shared = [values[k] for k in shared_keys]
-            name_score = sum(20 if RATING.match(k) else 8 for k in shared_keys)
+            name_score, shared, differences = compare_names(original_values, name_values(card.name))
             same_series = card.category == product.category
-            parts = ["та же серия" if same_series else "та же категория"]
+            same_category = (card.category or "").split("/")[:2] == path[:2]
+            parts = [
+                "та же серия"
+                if same_series
+                else "та же категория"
+                if same_category
+                else "похожий товар из другого раздела"
+            ]
             if shared:
                 parts.append("в наименовании совпадает: " + ", ".join(shared))
             if matched:
                 parts.append("характеристики: " + ", ".join(matched[:3]))
             if not shared and not matched:
                 parts.append("похожее наименование")
+            if differences:
+                parts.append("отличается: " + ", ".join(differences))
             parts.append(f"в наличии {card.stock} шт.")
             score = (
                 name_score

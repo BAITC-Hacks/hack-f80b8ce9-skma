@@ -58,6 +58,25 @@ export type ChatResponse = {
   cart_url: string | null;
 };
 
+export type SpecStatus = "in_stock" | "partial" | "out_of_stock" | "not_found";
+
+export type SpecLine = {
+  row: number;
+  query: string;
+  requested_qty: number;
+  status: SpecStatus;
+  product: ProductCard | null;
+  analog: Analog | null;
+};
+
+export type UploadResponse = ChatResponse & {
+  filename: string;
+  spec: SpecLine[];
+  skipped_rows: number;
+};
+
+export const SPEC_ACCEPT = ".csv,.xlsx,.docx";
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -68,9 +87,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // JSON bodies get a JSON header; FormData (file upload) sets its own multipart header.
+  const json = typeof init?.body === "string";
   const response = await fetch(`/api${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: { ...(json ? { "Content-Type": "application/json" } : {}), ...init?.headers },
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
@@ -89,6 +110,13 @@ export const api = {
 
   chat: (data: ChatRequest) =>
     request<ChatResponse>("/chat", { method: "POST", body: JSON.stringify(data) }),
+  uploadSpec: (file: File, sessionId: string, cartId: string | null) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("session_id", sessionId);
+    if (cartId) form.append("cart_id", cartId);
+    return request<UploadResponse>("/chat/upload", { method: "POST", body: form });
+  },
   getCart: (cartId: string) => request<Cart>(`/cart/${encodeURIComponent(cartId)}`),
   confirmAdd: (cartId: string, pendingId: string) =>
     request<Cart>(`/cart/${encodeURIComponent(cartId)}/confirm`, {

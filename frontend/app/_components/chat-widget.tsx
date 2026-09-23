@@ -5,11 +5,16 @@ import { useEffect, useRef, useState } from "react";
 
 import { ConfirmCard, type PendingStatus } from "@/app/_components/confirm-card";
 import { ProductCard } from "@/app/_components/product-card";
-import { api, ApiError, type ChatResponse } from "@/lib/api";
+import { SpecTable } from "@/app/_components/spec-table";
+import { api, ApiError, SPEC_ACCEPT, type ChatResponse, type UploadResponse } from "@/lib/api";
 
 type Message =
   | { id: string; role: "user"; text: string }
-  | { id: string; role: "assistant"; text: string; data?: ChatResponse };
+  | { id: string; role: "assistant"; text: string; data?: ChatResponse | UploadResponse };
+
+type Failed = { kind: "text"; text: string } | { kind: "file"; file: File };
+
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 const SUGGESTIONS = [
   "Есть в наличии 200300285_?",
@@ -45,6 +50,17 @@ function sessionId(): string {
   return id;
 }
 
+function uploadErrorText(error: unknown): string {
+  if (error instanceof ApiError && error.status === 413) return "Файл больше 2 МБ.";
+  if (error instanceof ApiError && error.status === 415)
+    return error.message.includes(".doc ")
+      ? "Старый формат .doc не поддерживается: сохраните файл как .docx."
+      : "Поддерживаются файлы .csv, .xlsx и .docx.";
+  if (error instanceof ApiError && error.status === 422)
+    return "Не удалось прочитать файл. Нужна колонка «Артикул» или «Наименование», можно добавить «Количество».";
+  return errorText(error);
+}
+
 function errorText(error: unknown): string {
   if (error instanceof ApiError && error.status === 409) return "Товара уже нет в наличии.";
   if (error instanceof ApiError && error.status === 503) return "Каталог временно недоступен.";
@@ -56,16 +72,23 @@ export function ChatWidget() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
+  const [failed, setFailed] = useState<Failed | null>(null);
   const [cartUrl, setCartUrl] = useState<string | null>(null);
   const [pendingStatus, setPendingStatus] = useState<Record<string, PendingStatus>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading, open]);
 
-  function addAssistant(text: string, data?: ChatResponse) {
+  useEffect(() => {
+    const openAssistant = () => setOpen(true);
+    window.addEventListener("ekt-open-assistant", openAssistant);
+    return () => window.removeEventListener("ekt-open-assistant", openAssistant);
+  }, []);
+
+  function addAssistant(text: string, data?: ChatResponse | UploadResponse) {
     setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "assistant", text, data }]);
   }
 
@@ -91,7 +114,46 @@ export function ChatWidget() {
       }
       addAssistant(data.reply, data);
     } catch {
-      setFailed(message);
+      setFailed({ kind: "text", text: message });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function upload(file: File, retry = false) {
+    if (loading) return;
+    if (!retry) {
+      setMessages((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "user", text: `📎 ${file.name}` },
+      ]);
+    }
+    const name = file.name.toLowerCase();
+    if (name.endsWith(".doc")) {
+      addAssistant("Старый формат .doc не поддерживается: сохраните файл как .docx.");
+      return;
+    }
+    if (!SPEC_ACCEPT.split(",").some((ext) => name.endsWith(ext))) {
+      addAssistant("Поддерживаются файлы .csv, .xlsx и .docx.");
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      addAssistant("Файл больше 2 МБ.");
+      return;
+    }
+    setLoading(true);
+    setFailed(null);
+    try {
+      const data = await api.uploadSpec(file, sessionId(), storageGet(CART_KEY));
+      storageSet(CART_KEY, data.cart_id);
+      if (data.cart_url) setCartUrl(data.cart_url);
+      addAssistant(data.reply, data);
+    } catch (error) {
+      if (error instanceof ApiError && error.status < 500) {
+        addAssistant(uploadErrorText(error));
+      } else {
+        setFailed({ kind: "file", file });
+      }
     } finally {
       setLoading(false);
     }
@@ -156,6 +218,10 @@ export function ChatWidget() {
                   Здравствуйте! Подскажу наличие и характеристики товара, подберу аналог и помогу
                   добавить товар в корзину. Спросите, например:
                 </p>
+                <p className="text-xs text-zinc-500">
+                  Или прикрепите спецификацию .csv / .xlsx / .docx кнопкой 📎 — проверю наличие по
+                  каждой строке.
+                </p>
                 <div className="flex flex-wrap gap-2">
                   {SUGGESTIONS.map((s) => (
                     <button
@@ -183,6 +249,9 @@ export function ChatWidget() {
                   <p className="w-fit max-w-[90%] rounded-2xl rounded-bl-sm bg-white px-3 py-2 text-sm whitespace-pre-line shadow-sm">
                     {m.text}
                   </p>
+                  {m.data && "spec" in m.data && (
+                    <SpecTable lines={m.data.spec} skipped={m.data.skipped_rows} />
+                  )}
                   {m.data?.products.map((p) => <ProductCard key={p.id} product={p} />)}
                   {m.data && m.data.analogs.length > 0 && (
                     <p className="text-xs font-medium tracking-wide text-zinc-500 uppercase">Аналоги</p>
@@ -209,7 +278,12 @@ export function ChatWidget() {
             {failed && (
               <div className="flex items-center gap-3 text-sm text-red-700">
                 <span>Не удалось получить ответ.</span>
-                <button onClick={() => send(failed, true)} className="underline">
+                <button
+                  onClick={() =>
+                    failed.kind === "text" ? send(failed.text, true) : upload(failed.file, true)
+                  }
+                  className="underline"
+                >
                   Повторить
                 </button>
               </div>
@@ -224,6 +298,28 @@ export function ChatWidget() {
             }}
             className="flex gap-2 border-t border-zinc-200 bg-white p-3 sm:rounded-b-xl"
           >
+            <input
+              ref={fileRef}
+              type="file"
+              accept={SPEC_ACCEPT}
+              className="hidden"
+              aria-label="Файл спецификации"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = ""; // allow picking the same file again
+                if (file) upload(file);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              disabled={loading}
+              title="Прикрепить спецификацию .csv, .xlsx или .docx"
+              aria-label="Прикрепить файл"
+              className="rounded-md border border-zinc-300 px-3 py-2 text-lg leading-none hover:bg-zinc-100 disabled:opacity-50"
+            >
+              📎
+            </button>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
