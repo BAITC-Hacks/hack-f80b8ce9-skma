@@ -242,7 +242,14 @@ def summarize(filename: str, lines: list[SpecLine], skipped: int) -> str:
         for x in lines
         if x.product and x.status in ("in_stock", "partial")
     )
-    parts = [f"Проверил «{filename}»: {len(lines)} позиций."]
+    size = len(lines)
+    noun = "позиций"
+    if not 11 <= size % 100 <= 14:
+        if size % 10 == 1:
+            noun = "позиция"
+        elif 2 <= size % 10 <= 4:
+            noun = "позиции"
+    parts = [f"Проверил «{filename}»: {size} {noun}."]
     parts.append(f"В наличии полностью: {count['in_stock']}")
     if count["partial"]:
         parts.append(f"частично: {count['partial']}")

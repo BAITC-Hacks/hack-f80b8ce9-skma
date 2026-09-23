@@ -320,16 +320,21 @@ class CatalogService:
     ) -> list[ProductCard]:
         """Details for several products; ones that fail or are too slow are skipped."""
         semaphore = asyncio.Semaphore(concurrency)
+        errors: list[CatalogUnavailableError] = []
 
         async def one(product_id: int) -> ProductCard | None:
             async with semaphore:
                 try:
                     return await self.get_product(product_id, timeout=timeout)
-                except CatalogUnavailableError:
+                except CatalogUnavailableError as exc:
+                    errors.append(exc)
                     return None
 
         cards = await asyncio.gather(*(one(i) for i in ids))
-        return [c for c in cards if c is not None]
+        available = [c for c in cards if c is not None]
+        if errors and not available:
+            raise errors[0]
+        return available
 
 
 catalog_service = CatalogService(cache_path=BACKEND_DIR / settings.detail_cache_path)

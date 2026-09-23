@@ -25,7 +25,10 @@ async def search_products(
     limit: int = Query(default=5, ge=1, le=20),
 ) -> list[ProductCard]:
     entries = search.search(q, limit)
-    return await catalog.get_products([e.id for e in entries])
+    try:
+        return await catalog.get_products([e.id for e in entries])
+    except CatalogUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Catalog API unavailable") from exc
 
 
 @router.get("/{product_id}", response_model=ProductCard)
@@ -38,4 +41,7 @@ async def get_analogs(
     product_id: int, catalog: CatalogServiceDep, search: SearchServiceDep
 ) -> list[Analog]:
     product = await load_product(product_id, catalog)
-    return await search.find_analogs(product)
+    try:
+        return await search.find_analogs(product)
+    except CatalogUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Catalog API unavailable") from exc

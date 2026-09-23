@@ -57,3 +57,40 @@ def test_catalog_down_uses_cached_copy(client, catalog, ekt):
     ekt.down = True
     catalog._details[3] = (-1e9, catalog._details[3][1])  # expire the cache entry
     assert client.get("/api/catalog/3").json()["stock"] == 13
+
+
+def test_search_reports_catalog_outage_instead_of_empty_results(client, ekt):
+    ekt.down = True
+    response = client.get("/api/catalog/search", params={"q": "200300290"})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Catalog API unavailable"
+
+
+def test_unknown_search_remains_empty_during_outage(client, ekt):
+    ekt.down = True
+    response = client.get("/api/catalog/search", params={"q": "zzzzzz999999"})
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_search_keeps_cached_results_during_outage(client, ekt):
+    client.get("/api/catalog/2")
+    ekt.down = True
+    response = client.get("/api/catalog/search", params={"q": "Legrand"})
+    assert response.status_code == 200
+    assert [card["id"] for card in response.json()] == [2]
+
+
+def test_analogs_report_outage_when_source_product_is_cached(client, ekt):
+    client.get("/api/catalog/1")
+    ekt.down = True
+    response = client.get("/api/catalog/1/analogs")
+    assert response.status_code == 503
+
+
+def test_chat_reports_outage_for_matching_catalog_search(client, ekt):
+    ekt.down = True
+    response = client.post(
+        "/api/chat", json={"session_id": "outage", "message": "Legrand", "cart_id": None}
+    )
+    assert response.status_code == 503

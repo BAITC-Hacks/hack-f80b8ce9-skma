@@ -12,7 +12,9 @@ type Message =
   | { id: string; role: "user"; text: string }
   | { id: string; role: "assistant"; text: string; data?: ChatResponse | UploadResponse };
 
-type Failed = { kind: "text"; text: string } | { kind: "file"; file: File };
+type Failed = ({ kind: "text"; text: string } | { kind: "file"; file: File }) & {
+  message: string;
+};
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -80,7 +82,16 @@ export function ChatWidget() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading, open]);
+  }, [messages, loading, open, failed]);
+
+  useEffect(() => {
+    if (!open) return;
+    const targets = [document.documentElement, document.body].filter(
+      (element) => !element.classList.contains("max-sm:overflow-hidden"),
+    );
+    targets.forEach((element) => element.classList.add("max-sm:overflow-hidden"));
+    return () => targets.forEach((element) => element.classList.remove("max-sm:overflow-hidden"));
+  }, [open]);
 
   useEffect(() => {
     const openAssistant = () => setOpen(true);
@@ -113,8 +124,8 @@ export function ChatWidget() {
         setPendingStatus((prev) => ({ ...prev, [data.pending!.pending_id]: "open" }));
       }
       addAssistant(data.reply, data);
-    } catch {
-      setFailed({ kind: "text", text: message });
+    } catch (error) {
+      setFailed({ kind: "text", text: message, message: errorText(error) });
     } finally {
       setLoading(false);
     }
@@ -122,6 +133,7 @@ export function ChatWidget() {
 
   async function upload(file: File, retry = false) {
     if (loading) return;
+    setFailed(null);
     if (!retry) {
       setMessages((prev) => [
         ...prev,
@@ -152,7 +164,7 @@ export function ChatWidget() {
       if (error instanceof ApiError && error.status < 500) {
         addAssistant(uploadErrorText(error));
       } else {
-        setFailed({ kind: "file", file });
+        setFailed({ kind: "file", file, message: uploadErrorText(error) });
       }
     } finally {
       setLoading(false);
@@ -211,7 +223,7 @@ export function ChatWidget() {
             </div>
           </header>
 
-          <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-4">
             {messages.length === 0 && (
               <div className="space-y-3 text-sm text-zinc-600">
                 <p>
@@ -240,7 +252,7 @@ export function ChatWidget() {
               m.role === "user" ? (
                 <p
                   key={m.id}
-                  className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm bg-blue-700 px-3 py-2 text-sm whitespace-pre-line text-white"
+                  className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm bg-blue-700 px-3 py-2 text-sm wrap-anywhere whitespace-pre-line text-white"
                 >
                   {m.text}
                 </p>
@@ -276,8 +288,8 @@ export function ChatWidget() {
 
             {loading && <p className="text-sm text-zinc-500">Консультант печатает…</p>}
             {failed && (
-              <div className="flex items-center gap-3 text-sm text-red-700">
-                <span>Не удалось получить ответ.</span>
+              <div role="alert" className="flex items-center gap-3 text-sm text-red-700">
+                <span>{failed.message}</span>
                 <button
                   onClick={() =>
                     failed.kind === "text" ? send(failed.text, true) : upload(failed.file, true)
@@ -324,10 +336,12 @@ export function ChatWidget() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Артикул, название или вопрос…"
+              aria-label="Сообщение консультанту"
               maxLength={2000}
               className="min-w-0 flex-1 rounded-md border border-zinc-300 px-3 py-2 text-base sm:text-sm"
             />
             <button
+              aria-label="Отправить сообщение"
               disabled={loading || !input.trim()}
               className="rounded-md bg-blue-700 px-4 py-2 font-medium text-white hover:bg-blue-800 disabled:opacity-50"
             >
