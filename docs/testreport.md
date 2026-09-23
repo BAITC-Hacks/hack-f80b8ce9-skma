@@ -40,15 +40,15 @@
 
 ### Скриншоты текущего прогона
 
-![Настольный ответ реальной модели](live-api-desktop.png)
+![Настольный ответ реальной модели](assets/live-api-desktop.png)
 
-![Мобильный ответ и граничное значение](live-api-mobile.png)
+![Мобильный ответ и граничное значение](assets/live-api-mobile.png)
 
-![Ошибка EKT при загрузке README CSV](live-api-catalog-error.png)
+![Ошибка EKT при загрузке README CSV](assets/live-api-catalog-error.png)
 
-![LLM прочитала артикул и количество из файла](live-api-file-context.png)
+![LLM прочитала артикул и количество из файла](assets/live-api-file-context.png)
 
-![Уточнение порогов по справочнику](live-api-boundaries.png)
+![Уточнение порогов по справочнику](assets/live-api-boundaries.png)
 
 Приложение оставлено запущенным с реальной LLM, временными данными SQLite и без EKT-доступа. Мобильный viewport сброшен. Физическое мобильное устройство, экранная клавиатура, PostgreSQL и другие браузеры не проверялись.
 
@@ -104,11 +104,11 @@
 
 Скриншоты итоговой версии:
 
-![Исправленное сообщение об ошибке на мобильном экране](fixed-mobile-error.png)
+![Исправленное сообщение об ошибке на мобильном экране](assets/fixed-mobile-error.png)
 
-![Успешная загрузка после ошибки](fixed-mobile-upload.png)
+![Успешная загрузка после ошибки](assets/fixed-mobile-upload.png)
 
-![Настольный чат после исправлений](fixed-desktop.png)
+![Настольный чат после исправлений](assets/fixed-desktop.png)
 
 ### Ограничения и оставшиеся замечания
 
@@ -209,11 +209,11 @@ http://127.0.0.1:3000/api/health
 
 Скриншоты текущего прогона:
 
-![Настольный чат](retest-desktop.png)
+![Настольный чат](assets/retest-desktop.png)
 
-![Ошибка загрузки примера README](retest-upload-desktop.png)
+![Ошибка загрузки примера README](assets/retest-upload-desktop.png)
 
-![Мобильный результат тестового CSV](retest-mobile.png)
+![Мобильный результат тестового CSV](assets/retest-mobile.png)
 
 Изображения в `frontend/public/guide/` — материалы самого репозитория, они не считаются доказательством успешного текущего прогона.
 
