@@ -19,6 +19,9 @@
 - Страница корзины `/cart/[id]` с количеством, стоимостью позиций и итогом.
 - Адаптивный чат с карточками товаров, состояниями загрузки и повтором запроса
   при ошибке; на небольшом экране чат занимает весь экран.
+  При недоступности карточек каталог возвращает 503 вместо пустой выдачи,
+  а чат показывает «Каталог временно недоступен» с кнопкой повтора.
+  На мобильном экране открытый чат блокирует прокрутку фоновой страницы.
 - Два режима ассистента: LLM с вызовом инструментов и резервный режим правил.
 - Загрузка спецификации `.csv` / `.xlsx` / `.docx` (кнопка 📎 в чате, до 2 МБ, до 50 строк):
   по каждой строке — найденный товар, остаток, статус (в наличии / частично / нет /
@@ -66,8 +69,12 @@ START → guard ─┬─ confirm ─────────▶ END   коро�
 - **Поиск и интеграции:** RapidFuzz, HTTPX.
 - **AI:** LangGraph (граф диалога, чекпойнтер истории), LangChain (`ChatOpenAI`, `@tool`).
   По умолчанию — OpenAI `https://api.openai.com/v1`, модель `gpt-5.4-mini`. Подходит любой
-  OpenAI-совместимый API с вызовом инструментов, например build.nvidia.com или свой NIM
-  на NVIDIA Brev.
+  OpenAI-совместимый API с вызовом инструментов, например build.nvidia.com с моделью
+  `qwen/qwen3-next-80b-a3b-instruct` или свой NIM на NVIDIA Brev.
+- **Гибридный режим (казахский):** основная модель (Qwen) ведёт диалог и вызывает
+  инструменты, а казахская модель Sherkala-8B (vLLM на NVIDIA Brev) переписывает ответ на
+  грамотный казахский, если клиент пишет по-казахски. Если модель недоступна или изменила
+  числа, клиент получает исходный ответ. Настройка NVIDIA API: [инструкция](mydocs/nvida-llm-instructions.md).
 - **Frontend:** TypeScript, Next.js 16 App Router, React 19, Tailwind CSS 4.
 - **Запуск и проверки:** Docker Compose, Make, pytest, Ruff, ESLint, TypeScript.
   Тесты backend используют SQLite в памяти через aiosqlite и подмены внешних API.
@@ -125,9 +132,13 @@ cp backend/.env.example backend/.env
 - `EKT_SYNC_PAGES` — число страниц для синхронизации, `0` означает все;
 - `OPENAI_API_KEY` — ключ выбранного LLM-сервиса; оставьте пустым для режима правил;
 - `OPENAI_BASE_URL`, `OPENAI_MODEL` — адрес сервиса и имя модели; по умолчанию
-  `https://api.openai.com/v1` и `gpt-5.4-mini`;
+  `https://api.openai.com/v1` и `gpt-5.4-mini` в коде; пример `backend/.env.example`
+  задаёт NVIDIA `https://integrate.api.nvidia.com/v1` и
+  `qwen/qwen3-next-80b-a3b-instruct`;
 - `OPENAI_REASONING_EFFORT` — для reasoning-моделей (`minimal` / `low` / `medium`),
   пусто — значение модели по умолчанию;
+- `KAZAKH_LLM_BASE_URL`, `KAZAKH_LLM_API_KEY`, `KAZAKH_LLM_MODEL` — казахская модель для
+  гибридного режима (vLLM на Brev); пустой адрес — режим выключен;
 - `DATABASE_URL` — для локального backend по умолчанию
   `postgresql+asyncpg://app:app@localhost:5432/ekt`.
 

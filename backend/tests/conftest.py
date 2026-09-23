@@ -15,6 +15,7 @@ from app.main import app  # noqa: E402
 from app.services.assistant_service import (  # noqa: E402
     SessionStore,
     get_checkpointer,
+    get_kazakh_llm_client,
     get_llm_client,
     get_session_store,
 )
@@ -61,6 +62,7 @@ def client(catalog: CatalogService) -> TestClient:
     app.dependency_overrides[get_session_store] = lambda: sessions
     app.dependency_overrides[get_checkpointer] = lambda: saver
     app.dependency_overrides[get_llm_client] = lambda: None
+    app.dependency_overrides[get_kazakh_llm_client] = lambda: None
     # The context manager runs the lifespan, which creates tables in a fresh SQLite DB.
     with TestClient(app) as test_client:
         yield test_client

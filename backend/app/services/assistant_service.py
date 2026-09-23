@@ -24,6 +24,7 @@ from app.services.agent_graph import build_chat_graph, run_chat_graph
 from app.services.attachment_service import spec_context, summarize
 from app.services.cart_service import CartError, CartService, CartServiceDep
 from app.services.catalog_service import CatalogService, CatalogServiceDep
+from app.services.kazakh_service import is_kazakh, rewrite_in_kazakh
 from app.services.search_service import SearchService, SearchServiceDep
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ class AssistantService:
         llm: BaseChatModel | None,
         sessions: SessionStore,
         checkpointer: BaseCheckpointSaver,
+        kazakh_llm: BaseChatModel | None = None,
     ) -> None:
         self.catalog = catalog
         self.search = search
@@ -121,6 +123,7 @@ class AssistantService:
         self.llm = llm
         self.sessions = sessions
         self.checkpointer = checkpointer
+        self.kazakh_llm = kazakh_llm
 
     async def reply(self, data: ChatRequest) -> ChatResponse:
         cart = await self.carts.ensure(data.cart_id)
@@ -139,6 +142,8 @@ class AssistantService:
                 turn = Turn()
         if text is None:
             text = await self._answer_without_llm(data.message, cart.id, session, turn)
+        if self.kazakh_llm is not None and is_kazakh(data.message):
+            text = await rewrite_in_kazakh(self.kazakh_llm, data.message, text)
 
         if turn.products:
             session.last_product_id = list(turn.products)[-1]
@@ -437,6 +442,21 @@ def get_llm_client() -> BaseChatModel | None:
     )
 
 
+@lru_cache
+def get_kazakh_llm_client() -> BaseChatModel | None:
+    """Kazakh model for the hybrid mode (OpenAI-compatible vLLM on Brev). None = off."""
+    if not settings.kazakh_llm_base_url:
+        return None
+    return ChatOpenAI(
+        model=settings.kazakh_llm_model,
+        base_url=settings.kazakh_llm_base_url,
+        api_key=settings.kazakh_llm_api_key,
+        timeout=settings.kazakh_llm_timeout_seconds,
+        max_retries=0,
+        temperature=0.2,
+    )
+
+
 session_store = SessionStore()
 checkpointer = InMemorySaver()
 
@@ -456,8 +476,9 @@ def get_assistant_service(
     llm: Annotated[BaseChatModel | None, Depends(get_llm_client)],
     sessions: Annotated[SessionStore, Depends(get_session_store)],
     saver: Annotated[BaseCheckpointSaver, Depends(get_checkpointer)],
+    kazakh_llm: Annotated[BaseChatModel | None, Depends(get_kazakh_llm_client)],
 ) -> AssistantService:
-    return AssistantService(catalog, search, carts, llm, sessions, saver)
+    return AssistantService(catalog, search, carts, llm, sessions, saver, kazakh_llm)
 
 
 AssistantServiceDep = Annotated[AssistantService, Depends(get_assistant_service)]
