@@ -84,7 +84,7 @@ START → guard ─┬─ confirm ─────────▶ END   коро�
   указана `inception42/Llama-3.1-Sherkala-8B-Chat` для vLLM. При ошибке модели,
   пустом ответе или изменении набора числовых фрагментов возвращается исходный
   ответ. Основная модель для диалога может быть OpenAI, NVIDIA или другим
-  совместимым сервисом. [Инструкция по NVIDIA API](mydocs/nvida-llm-instructions.md).
+  совместимым сервисом. [Инструкция по NVIDIA API](docs/nvida-llm-instructions.md).
 - **Frontend:** TypeScript, Next.js 16 App Router, React 19, Tailwind CSS 4.
 - **Запуск и проверки:** Docker Compose, Make, pytest, Ruff, ESLint, TypeScript.
   Тесты backend используют SQLite в памяти через aiosqlite и подмены внешних API.
