@@ -21,11 +21,13 @@ class Settings(BaseSettings):
     detail_timeout_seconds: float = 8
     analog_timeout_seconds: float = 4
 
-    # Any OpenAI-compatible API: OpenAI, build.nvidia.com, own NIM on Brev
-    openai_base_url: str = "https://integrate.api.nvidia.com/v1"
+    # Any OpenAI-compatible API: OpenAI (default), build.nvidia.com, own NIM on Brev
+    openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
-    openai_model: str = "meta/llama-3.3-70b-instruct"
+    openai_model: str = "gpt-5.4-mini"
     openai_timeout_seconds: float = 30
+    # For reasoning models (gpt-5*, o*): "minimal" / "low" keeps chat latency down.
+    openai_reasoning_effort: str | None = None
 
 
 settings = Settings()

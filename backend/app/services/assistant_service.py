@@ -4,15 +4,23 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
+import httpx
 from fastapi import Depends
-from openai import AsyncOpenAI, OpenAIError
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.tools import BaseTool, tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
+from openai import OpenAIError
 
 from app.core.config import settings
 from app.schemas.cart import PendingAdd
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.schemas.product import Analog, ProductCard
+from app.services.agent_graph import build_chat_graph, run_chat_graph
 from app.services.cart_service import CartError, CartService, CartServiceDep
 from app.services.catalog_service import CatalogService, CatalogServiceDep
 from app.services.search_service import SearchService, SearchServiceDep
@@ -20,94 +28,7 @@ from app.services.search_service import SearchService, SearchServiceDep
 logger = logging.getLogger(__name__)
 
 TERMS_PATH = Path(__file__).resolve().parents[2] / "data" / "terms.md"
-MAX_TOOL_ROUNDS = 5
-HISTORY_LIMIT = 20
-
-SYSTEM_PROMPT = """Ты — консультант интернет-магазина электротехники ekt.kz (ТОО «Электрокомплект»).
-Отвечай на языке клиента (русский или казахский), коротко и по делу.
-
-Правила:
-- Цены, остатки, характеристики и условия называй ТОЛЬКО из результатов инструментов.
-  Если данных нет — так и скажи. Никогда не выдумывай числа.
-- Для поиска товара вызывай search_products, для подробностей — get_product.
-- Если товара нет в наличии (stock = 0), сразу вызови find_analogs и объясни, почему
-  предложен аналог (поле reason).
-- Сертификатов в базе пока нет: если спрашивают, скажи, что сертификата в базе нет, и
-  предложи уточнить у менеджера.
-- Об оплате, доставке, минимальной партии — вызывай get_purchase_terms. Кратность товара
-  (min_qty) есть в карточке.
-- Добавить в корзину ты можешь только ПРЕДЛОЖИТЬ через propose_add_to_cart. Корзина
-  меняется, только когда клиент нажмёт «Да, добавить». Не говори, что товар уже добавлен.
-- Не запрашивай платёжные данные.
-- Карточки товаров клиент видит под твоим ответом, не перечисляй все характеристики."""
-
-TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "Поиск товаров по артикулу, коду производителя или названию.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Артикул или описание товара"},
-                    "limit": {"type": "integer", "default": 5},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_product",
-            "description": "Карточка товара: цена, остаток по складам, характеристики.",
-            "parameters": {
-                "type": "object",
-                "properties": {"product_id": {"type": "integer"}},
-                "required": ["product_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_analogs",
-            "description": "Аналоги в наличии для товара, с обоснованием.",
-            "parameters": {
-                "type": "object",
-                "properties": {"product_id": {"type": "integer"}},
-                "required": ["product_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_purchase_terms",
-            "description": "Условия покупки: оплата, доставка, минимальная партия, возврат.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "propose_add_to_cart",
-            "description": (
-                "Предложить клиенту добавить товар в корзину. НЕ меняет корзину: клиент "
-                "должен подтвердить кнопкой. Количество ограничивается остатком."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "product_id": {"type": "integer"},
-                    "qty": {"type": "integer", "minimum": 1},
-                },
-                "required": ["product_id", "qty"],
-            },
-        },
-    },
-]
+REJECTED_TEXT = "Хорошо, не добавляю. Корзина не изменилась."
 
 CONFIRM_WORDS = {"да", "ок", "окей", "давай", "добавь", "добавьте", "добавляй", "подтверждаю",
                  "согласен", "конечно", "иә", "ия", "yes"}  # fmt: skip
@@ -160,12 +81,11 @@ def money(value: float | None) -> str:
 
 @dataclass
 class Session:
-    history: list[dict[str, str]] = field(default_factory=list)
     last_product_id: int | None = None
 
 
 class SessionStore:
-    """Chat history in process memory (per the spec, not persisted)."""
+    """Per-session context in process memory. LLM chat history is in the checkpointer."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
@@ -189,37 +109,37 @@ class AssistantService:
         catalog: CatalogService,
         search: SearchService,
         carts: CartService,
-        llm: AsyncOpenAI | None,
+        llm: BaseChatModel | None,
         sessions: SessionStore,
+        checkpointer: BaseCheckpointSaver,
     ) -> None:
         self.catalog = catalog
         self.search = search
         self.carts = carts
         self.llm = llm
         self.sessions = sessions
+        self.checkpointer = checkpointer
 
     async def reply(self, data: ChatRequest) -> ChatResponse:
         cart = await self.carts.ensure(data.cart_id)
         session = self.sessions.get(data.session_id)
         turn = Turn()
 
-        pending = await self.carts.latest_pending(cart.id)
-        if pending and is_confirmation(data.message):
-            text = await self._confirm(cart.id, pending.id)
-        elif pending and is_rejection(data.message):
-            await self.carts.reject(cart.id, pending.id)
-            text = "Хорошо, не добавляю. Корзина не изменилась."
-        else:
-            text = await self._answer(data.message, cart.id, session, turn)
+        text: str | None = None
+        if self.llm is not None:
+            try:
+                text = await self._answer_llm(data, cart.id, session, turn)
+            except (OpenAIError, GraphRecursionError, httpx.HTTPError) as exc:
+                # Keep the demo alive: answer with rules. A failed run can leave unanswered
+                # tool calls in the thread, so the LLM history starts over.
+                logger.warning("LLM failed, using rule-based answer: %s", exc)
+                await self.checkpointer.adelete_thread(data.session_id)
+                turn = Turn()
+        if text is None:
+            text = await self._answer_without_llm(data.message, cart.id, session, turn)
 
-        session.history += [
-            {"role": "user", "content": data.message},
-            {"role": "assistant", "content": text},
-        ]
-        session.history = session.history[-HISTORY_LIMIT:]
         if turn.products:
             session.last_product_id = list(turn.products)[-1]
-
         cart_state = await self.carts.get(cart.id)
         return ChatResponse(
             reply=text,
@@ -239,16 +159,15 @@ class AssistantService:
             raise
         return f"Добавил в корзину ({added} шт.). В корзине позиций: {len(cart.items)}."
 
-    async def _answer(self, message: str, cart_id: str, session: Session, turn: Turn) -> str:
-        if self.llm is not None:
-            try:
-                return await self._answer_llm(message, cart_id, session, turn)
-            except OpenAIError as exc:
-                # Keep the demo alive: fall back to the rule-based assistant.
-                logger.warning("LLM failed, using rule-based answer: %s", exc)
-                turn.products.clear()
-                turn.analogs.clear()
-                turn.pending = None
+    async def _answer_without_llm(
+        self, message: str, cart_id: str, session: Session, turn: Turn
+    ) -> str:
+        pending = await self.carts.latest_pending(cart_id)
+        if pending and is_confirmation(message):
+            return await self._confirm(cart_id, pending.id)
+        if pending and is_rejection(message):
+            await self.carts.reject(cart_id, pending.id)
+            return REJECTED_TEXT
         return await self._answer_rules(message, cart_id, session, turn)
 
     # --- tools ---------------------------------------------------------------------
@@ -296,60 +215,81 @@ class AssistantService:
             }
         return {"error": f"unknown tool {name}"}
 
-    # --- LLM mode ------------------------------------------------------------------
+    # --- LLM mode: LangGraph (see agent_graph.py) --------------------------------------
 
-    async def _answer_llm(self, message: str, cart_id: str, session: Session, turn: Turn) -> str:
+    def _tools(self, cart_id: str, turn: Turn) -> list[BaseTool]:
+        """LangChain tools bound to this request's cart; results also fill `turn` (UI cards)."""
+
+        async def run(name: str, **args: Any) -> str:
+            result = await self._run_tool(name, args, cart_id, turn)
+            return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+        @tool
+        async def search_products(query: str, limit: int = 5) -> str:
+            """Поиск товаров по артикулу ekt.kz (например 200300285_), коду производителя
+            (027228) или описанию («автомат Legrand 3P 160А»). Возвращает product_id, цену,
+            остаток (stock) и кратность (min_qty)."""
+            return await run("search_products", query=query, limit=limit)
+
+        @tool
+        async def get_product(product_id: int) -> str:
+            """Карточка товара: цена, остаток по складам, характеристики, сертификат."""
+            return await run("get_product", product_id=product_id)
+
+        @tool
+        async def find_analogs(product_id: int) -> str:
+            """Аналоги в наличии для товара, с обоснованием выбора (поле reason)."""
+            return await run("find_analogs", product_id=product_id)
+
+        @tool
+        async def get_purchase_terms() -> str:
+            """Условия покупки ekt.kz: оплата, доставка, минимальная партия, возврат, контакты."""
+            return await run("get_purchase_terms")
+
+        @tool
+        async def propose_add_to_cart(product_id: int, qty: int) -> str:
+            """Предложить клиенту добавить товар в корзину. НЕ меняет корзину: клиент
+            подтверждает сам. Количество ограничивается остатком."""
+            return await run("propose_add_to_cart", product_id=product_id, qty=qty)
+
+        return [search_products, get_product, find_analogs, get_purchase_terms, propose_add_to_cart]
+
+    async def _answer_llm(
+        self, data: ChatRequest, cart_id: str, session: Session, turn: Turn
+    ) -> str:
         assert self.llm is not None
+        pending_ids: list[str] = []
+
+        async def guard(text: str) -> Literal["confirm", "reject", "agent"]:
+            pending = await self.carts.latest_pending(cart_id)
+            if pending and is_confirmation(text):
+                pending_ids.append(pending.id)
+                return "confirm"
+            if pending and is_rejection(text):
+                pending_ids.append(pending.id)
+                return "reject"
+            return "agent"
+
+        async def confirm() -> str:
+            return await self._confirm(cart_id, pending_ids[-1])
+
+        async def reject() -> str:
+            await self.carts.reject(cart_id, pending_ids[-1])
+            return REJECTED_TEXT
+
         context = ""
         if session.last_product_id:
-            context = f"\nПоследний товар в диалоге: product_id={session.last_product_id}."
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT + context},
-            *session.history,
-            {"role": "user", "content": message},
-        ]
-        for _ in range(MAX_TOOL_ROUNDS):
-            response = await self.llm.chat.completions.create(
-                model=settings.openai_model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0.2,
-            )
-            msg = response.choices[0].message
-            if not msg.tool_calls:
-                return (msg.content or "").strip() or "Уточните, пожалуйста, запрос."
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": [
-                        {
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.function.name,
-                                "arguments": call.function.arguments,
-                            },
-                        }
-                        for call in msg.tool_calls
-                    ],
-                }
-            )
-            for call in msg.tool_calls:
-                try:
-                    args = json.loads(call.function.arguments or "{}")
-                    result = await self._run_tool(call.function.name, args, cart_id, turn)
-                except (ValueError, KeyError, TypeError) as exc:
-                    result = {"error": f"bad arguments: {exc}"}
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    }
-                )
-        return "Не удалось подготовить ответ, попробуйте переформулировать вопрос."
+            context = f"\n\nПоследний показанный товар: product_id={session.last_product_id}."
+        graph = build_chat_graph(
+            self.llm,
+            self._tools(cart_id, turn),
+            guard=guard,
+            confirm=confirm,
+            reject=reject,
+            checkpointer=self.checkpointer,
+            context=context,
+        )
+        return await run_chat_graph(graph, data.session_id, data.message)
 
     # --- rule-based mode (no LLM key or LLM failure) ---------------------------------
 
@@ -451,32 +391,44 @@ class AssistantService:
 
 
 @lru_cache
-def get_llm_client() -> AsyncOpenAI | None:
+def get_llm_client() -> BaseChatModel | None:
+    """Any OpenAI-compatible chat API (OpenAI, build.nvidia.com, own NIM). None = rules only."""
     if not settings.openai_api_key:
         return None
-    return AsyncOpenAI(
+    extra: dict[str, Any] = {}
+    if settings.openai_reasoning_effort:
+        extra["reasoning_effort"] = settings.openai_reasoning_effort
+    return ChatOpenAI(
+        model=settings.openai_model,
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
         timeout=settings.openai_timeout_seconds,
         max_retries=1,
+        **extra,
     )
 
 
 session_store = SessionStore()
+checkpointer = InMemorySaver()
 
 
 def get_session_store() -> SessionStore:
     return session_store
 
 
+def get_checkpointer() -> BaseCheckpointSaver:
+    return checkpointer
+
+
 def get_assistant_service(
     catalog: CatalogServiceDep,
     search: SearchServiceDep,
     carts: CartServiceDep,
-    llm: Annotated[AsyncOpenAI | None, Depends(get_llm_client)],
+    llm: Annotated[BaseChatModel | None, Depends(get_llm_client)],
     sessions: Annotated[SessionStore, Depends(get_session_store)],
+    saver: Annotated[BaseCheckpointSaver, Depends(get_checkpointer)],
 ) -> AssistantService:
-    return AssistantService(catalog, search, carts, llm, sessions)
+    return AssistantService(catalog, search, carts, llm, sessions, saver)
 
 
 AssistantServiceDep = Annotated[AssistantService, Depends(get_assistant_service)]

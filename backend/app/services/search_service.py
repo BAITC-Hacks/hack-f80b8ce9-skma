@@ -17,7 +17,7 @@ STOP_WORDS = {
 }  # fmt: skip
 # How customers say it -> how the ekt.kz catalog writes it in names.
 SYNONYMS = [
-    (r"\bдиф\.?\s*автомат\w*|\bдифавтомат\w*", "авдт"),
+    (r"\bдиф\w*\.?\s*автомат\w*|\bдифавтомат\w*", "авдт"),
     (r"\bавтоматическ\w* выключател\w*|\bавтомат\w*", "ав"),
     (r"\bсветодиодн\w*", "led"),
 ]

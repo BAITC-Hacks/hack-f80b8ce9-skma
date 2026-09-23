@@ -42,8 +42,8 @@ sync-catalog: ## Download ekt.kz product list into backend/data/catalog.json
 warm-cache: ## Pre-load demo products and analogs into the detail cache
 	cd backend && .venv/bin/python -m scripts.warm_cache
 
-llm-smoke: ## Check the configured LLM (tool calling, speed)
-	cd backend && .venv/bin/python -m scripts.llm_smoke
+llm-smoke: ## Run the LLM assistant on demo questions (MODELS="gpt-4.1-mini gpt-5.4-mini")
+	cd backend && .venv/bin/python -m scripts.llm_smoke $(MODELS)
 
 backend: ## Run FastAPI on :8000 with reload
 	cd backend && .venv/bin/uvicorn app.main:app --reload --port 8000

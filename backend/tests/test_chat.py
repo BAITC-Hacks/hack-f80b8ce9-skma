@@ -1,37 +1,46 @@
 import json
-from types import SimpleNamespace
 
 import httpx
 import openai
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from app.main import app
 from app.services.assistant_service import get_llm_client
 
 
 def tool_call(name, **args):
-    return SimpleNamespace(
-        id=f"call_{name}", function=SimpleNamespace(name=name, arguments=json.dumps(args))
-    )
+    return {"name": name, "args": args, "id": f"call_{name}", "type": "tool_call"}
 
 
-def llm_message(content=None, *calls):
-    return SimpleNamespace(content=content, tool_calls=list(calls) or None)
+def llm_message(content="", *calls):
+    return AIMessage(content=content or "", tool_calls=list(calls))
 
 
-class FakeLLM:
-    """Returns scripted messages one by one and records what it was sent."""
+class FakeLLM(BaseChatModel):
+    """LangChain chat model that returns scripted messages and records its inputs."""
 
-    def __init__(self, *script, error: Exception | None = None):
-        self.script = list(script)
-        self.error = error
-        self.requests = []
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+    script: list[AIMessage] = Field(default_factory=list)
+    error: Exception | None = None
+    requests: list[list] = Field(default_factory=list)
 
-    async def create(self, **kwargs):
-        self.requests.append(kwargs)
+    def __init__(self, *script: AIMessage, error: Exception | None = None):
+        super().__init__(script=list(script), error=error)
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.requests.append(list(messages))
         if self.error:
             raise self.error
-        return SimpleNamespace(choices=[SimpleNamespace(message=self.script.pop(0))])
+        return ChatResult(generations=[ChatGeneration(message=self.script.pop(0))])
 
 
 def use_llm(fake):
@@ -47,9 +56,7 @@ def chat(client, message, cart_id=None, session_id="s1"):
 
 
 def test_chat_returns_product_card_from_tool(client):
-    use_llm(
-        FakeLLM(llm_message(None, tool_call("get_product", product_id=2)), llm_message("Есть."))
-    )
+    use_llm(FakeLLM(llm_message("", tool_call("get_product", product_id=2)), llm_message("Есть.")))
     body = chat(client, "есть 027230?")
     assert body["reply"] == "Есть."
     assert body["products"][0]["price"] == 71000
@@ -57,18 +64,16 @@ def test_chat_returns_product_card_from_tool(client):
 
 
 def test_tool_results_are_sent_back_to_llm(client):
-    fake = FakeLLM(llm_message(None, tool_call("get_product", product_id=2)), llm_message("ok"))
+    fake = FakeLLM(llm_message("", tool_call("get_product", product_id=2)), llm_message("ok"))
     use_llm(fake)
     chat(client, "есть 027230?")
-    tool_msg = fake.requests[1]["messages"][-1]
-    assert tool_msg["role"] == "tool"
-    assert json.loads(tool_msg["content"])["stock"] == 19
+    tool_msg = fake.requests[1][-1]
+    assert isinstance(tool_msg, ToolMessage)
+    assert json.loads(tool_msg.content)["stock"] == 19
 
 
 def test_chat_analogs_have_reason(client):
-    use_llm(
-        FakeLLM(llm_message(None, tool_call("find_analogs", product_id=1)), llm_message("Нет."))
-    )
+    use_llm(FakeLLM(llm_message("", tool_call("find_analogs", product_id=1)), llm_message("Нет.")))
     body = chat(client, "есть 027228?")
     assert body["analogs"] and all(a["reason"] for a in body["analogs"])
 
@@ -76,7 +81,7 @@ def test_chat_analogs_have_reason(client):
 def test_chat_propose_creates_pending_not_cart_item(client):
     use_llm(
         FakeLLM(
-            llm_message(None, tool_call("propose_add_to_cart", product_id=2, qty=3)),
+            llm_message("", tool_call("propose_add_to_cart", product_id=2, qty=3)),
             llm_message("Добавить 3 шт.?"),
         )
     )
@@ -89,7 +94,7 @@ def test_chat_propose_creates_pending_not_cart_item(client):
 def test_text_yes_confirms_latest_pending(client):
     use_llm(
         FakeLLM(
-            llm_message(None, tool_call("propose_add_to_cart", product_id=2, qty=3)),
+            llm_message("", tool_call("propose_add_to_cart", product_id=2, qty=3)),
             llm_message("Добавить?"),
         )
     )
@@ -102,7 +107,7 @@ def test_text_yes_confirms_latest_pending(client):
 def test_text_no_rejects_pending(client):
     use_llm(
         FakeLLM(
-            llm_message(None, tool_call("propose_add_to_cart", product_id=2, qty=3)),
+            llm_message("", tool_call("propose_add_to_cart", product_id=2, qty=3)),
             llm_message("Добавить?"),
         )
     )
@@ -115,7 +120,7 @@ def test_injection_does_not_change_cart(client):
     # The model obeys the user and proposes; the cart still must not change.
     use_llm(
         FakeLLM(
-            llm_message(None, tool_call("propose_add_to_cart", product_id=2, qty=1000)),
+            llm_message("", tool_call("propose_add_to_cart", product_id=2, qty=1000)),
             llm_message("Готово!"),
         )
     )
@@ -143,7 +148,7 @@ def test_history_is_kept_per_session(client):
     use_llm(fake)
     chat(client, "привет")
     chat(client, "а второй есть?")
-    contents = [m["content"] for m in fake.requests[1]["messages"]]
+    contents = [m.content for m in fake.requests[1]]
     assert "привет" in contents and "Первый" in contents
 
 
@@ -179,3 +184,26 @@ def test_rules_full_add_flow(client):
     body = chat(client, "да", first["cart_id"])
     assert body["cart_url"]
     assert client.get(f"/api/cart/{first['cart_id']}").json()["items"][0]["qty"] == 19
+
+
+def test_llm_mode_text_yes_goes_through_guard_not_llm(client):
+    # After the proposal, "да" is handled by the graph's guard node: the LLM is not called.
+    fake = FakeLLM(
+        llm_message("", tool_call("propose_add_to_cart", product_id=2, qty=2)),
+        llm_message("Добавить 2 шт.?"),
+    )
+    use_llm(fake)
+    cart_id = chat(client, "добавь 2 шт 027230")["cart_id"]
+    calls = len(fake.requests)
+    body = chat(client, "да", cart_id)
+    assert len(fake.requests) == calls
+    assert body["cart_url"] == f"/cart/{cart_id}"
+
+
+def test_llm_failure_resets_thread_history(client):
+    use_llm(FakeLLM(error=openai.APIConnectionError(request=httpx.Request("POST", "http://llm"))))
+    chat(client, "привет")
+    fake = FakeLLM(llm_message("Здравствуйте"))
+    use_llm(fake)
+    chat(client, "снова привет")
+    assert [m.content for m in fake.requests[0] if m.type == "human"] == ["снова привет"]

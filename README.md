@@ -36,19 +36,34 @@
 6. Покупатель переходит на страницу корзины. Кнопка оформления открывает ekt.kz;
    автоматического переноса позиций на сайт партнёра пока нет.
 
-В LLM-режиме доступны инструменты `search_products`, `get_product`, `find_analogs`,
-`get_purchase_terms`, `propose_add_to_cart`. На ответ отведено до пяти раундов
-вызова инструментов. При пустом ключе LLM или ошибке её API используется обработка
-по ключевым словам и те же сервисы каталога и корзины.
+LLM-режим построен на LangGraph ([agent_graph.py](backend/app/services/agent_graph.py)):
+
+```text
+START → guard ─┬─ confirm ─────────▶ END   короткое «да» на открытое предложение → корзина
+               ├─ reject ──────────▶ END   «нет» → предложение отменено
+               └─ agent ⇄ tools ───▶ END   ChatOpenAI + инструменты каталога
+```
+
+- `guard` — код, а не модель: корзину меняет только явное «да» на последнее предложение.
+- `agent` — LangChain `ChatOpenAI` с инструментами `@tool`: `search_products`, `get_product`,
+  `find_analogs`, `get_purchase_terms`, `propose_add_to_cart`. Инструменты выполняет
+  `ToolNode`, лимит — около шести раундов «модель ⇄ инструменты».
+- История диалога — в чекпойнтере LangGraph (поток = `session_id`). В модель уходят
+  последние 30 сообщений.
+
+При пустом ключе LLM или ошибке её API используется обработка по ключевым словам
+и те же сервисы каталога и корзины. История LLM-диалога этой сессии при ошибке
+сбрасывается.
 
 ## Технологии
 
 - **Backend:** Python 3.10+, FastAPI, Uvicorn, Pydantic Settings.
 - **Хранение:** PostgreSQL 17, SQLAlchemy AsyncIO и asyncpg; SQLite для кэша карточек.
-- **Поиск и интеграции:** RapidFuzz, HTTPX, Python SDK `openai`.
-- **AI:** OpenAI-совместимый API. В конфигурации по умолчанию указан endpoint
-  `https://integrate.api.nvidia.com/v1` и модель `meta/llama-3.3-70b-instruct`.
-  Для LLM-режима нужен доступ к модели с поддержкой вызова инструментов.
+- **Поиск и интеграции:** RapidFuzz, HTTPX.
+- **AI:** LangGraph (граф диалога, чекпойнтер истории), LangChain (`ChatOpenAI`, `@tool`).
+  По умолчанию — OpenAI `https://api.openai.com/v1`, модель `gpt-5.4-mini`. Подходит любой
+  OpenAI-совместимый API с вызовом инструментов, например build.nvidia.com или свой NIM
+  на NVIDIA Brev.
 - **Frontend:** TypeScript, Next.js 16 App Router, React 19, Tailwind CSS 4.
 - **Запуск и проверки:** Docker Compose, Make, pytest, Ruff, ESLint, TypeScript.
   Тесты backend используют SQLite в памяти через aiosqlite и подмены внешних API.
@@ -58,12 +73,14 @@
 Браузер обращается к `/api/*` на Next.js, который проксирует запросы в FastAPI.
 Маршруты backend передают работу сервисам:
 
-- `assistant_service` — диалог, вызовы инструментов LLM, резервные правила;
+- `agent_graph` — граф LangGraph: guard, агент с инструментами, чекпойнтер;
+- `assistant_service` — инструменты для LLM, подтверждение корзины, резервные правила;
 - `search_service` — поиск и ранжирование аналогов;
 - `catalog_service` — локальный список товаров, API ekt.kz, кэш в памяти и SQLite;
 - `cart_service` — корзины и ожидающие подтверждения в PostgreSQL.
 
-История диалогов хранится отдельно, в памяти процесса backend. Идентификаторы
+История LLM-диалогов хранится в чекпойнтере LangGraph (`InMemorySaver`) в памяти
+процесса backend. Идентификаторы
 сессии и корзины frontend сохраняет в `localStorage`.
 
 ```text
@@ -103,7 +120,10 @@ cp backend/.env.example backend/.env
 - `EKT_API_URL` — по умолчанию `https://ekt.kz/api`;
 - `EKT_SYNC_PAGES` — число страниц для синхронизации, `0` означает все;
 - `OPENAI_API_KEY` — ключ выбранного LLM-сервиса; оставьте пустым для режима правил;
-- `OPENAI_BASE_URL`, `OPENAI_MODEL` — адрес сервиса и имя модели;
+- `OPENAI_BASE_URL`, `OPENAI_MODEL` — адрес сервиса и имя модели; по умолчанию
+  `https://api.openai.com/v1` и `gpt-5.4-mini`;
+- `OPENAI_REASONING_EFFORT` — для reasoning-моделей (`minimal` / `low` / `medium`),
+  пусто — значение модели по умолчанию;
 - `DATABASE_URL` — для локального backend по умолчанию
   `postgresql+asyncpg://app:app@localhost:5432/ekt`.
 
@@ -204,8 +224,16 @@ curl -fsS http://localhost:3000/api/health
 ```
 
 Все три запроса должны вернуть `{"status":"ok"}`. Последний также проверяет
-проксирование через Next.js. `make llm-smoke` отдельно обращается к настроенной
-LLM и проверяет вызов инструмента; для него нужен доступ к внешнему сервису.
+проксирование через Next.js.
+
+`make llm-smoke` прогоняет настоящий граф LangGraph с реальным каталогом и LLM на
+демо-вопросах и печатает ответы, вызванные инструменты и время ответа. Сравнить модели:
+`make llm-smoke MODELS="gpt-5.4-mini gpt-4.1-mini"`. На 23.09.2026:
+
+| Модель | Время ответа | Инструменты |
+|---|---|---|
+| `gpt-5.4-mini` | 1,9–5,2 с | правильно на всех 4 вопросах |
+| `gpt-4.1-mini` | 2,7–5,9 с | в 1 из 4 вопросов неверно сказал, что товара нет |
 
 ## Данные и интеграции
 

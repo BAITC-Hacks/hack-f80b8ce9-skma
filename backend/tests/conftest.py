@@ -9,10 +9,12 @@ import copy  # noqa: E402
 import httpx  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from app.main import app  # noqa: E402
 from app.services.assistant_service import (  # noqa: E402
     SessionStore,
+    get_checkpointer,
     get_llm_client,
     get_session_store,
 )
@@ -53,9 +55,11 @@ def catalog(ekt: FakeEkt) -> CatalogService:
 def client(catalog: CatalogService) -> TestClient:
     items = ItemService()
     sessions = SessionStore()
+    saver = InMemorySaver()
     app.dependency_overrides[get_item_service] = lambda: items
     app.dependency_overrides[get_catalog_service] = lambda: catalog
     app.dependency_overrides[get_session_store] = lambda: sessions
+    app.dependency_overrides[get_checkpointer] = lambda: saver
     app.dependency_overrides[get_llm_client] = lambda: None
     # The context manager runs the lifespan, which creates tables in a fresh SQLite DB.
     with TestClient(app) as test_client:
