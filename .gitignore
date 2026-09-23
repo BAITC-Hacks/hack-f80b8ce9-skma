@@ -18,6 +18,7 @@ next-env.d.ts
 .env.local
 
 # Editors / OS
+/Hackton2026.code-workspace
 .history/
 .vscode/
 .idea/
