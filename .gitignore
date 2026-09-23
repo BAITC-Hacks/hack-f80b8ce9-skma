@@ -22,3 +22,9 @@ next-env.d.ts
 .vscode/
 .idea/
 .DS_Store
+
+# Partner credentials and catalog dump
+docs/*ДАННЫЕ*
+backend/data/catalog.json
+backend/data/details_cache.sqlite
+docs/creds.md
