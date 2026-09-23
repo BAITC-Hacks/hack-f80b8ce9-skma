@@ -24,7 +24,8 @@ next-env.d.ts
 .DS_Store
 
 # Partner credentials and catalog dump
-docs/*ДАННЫЕ*
 backend/data/catalog.json
 backend/data/details_cache.sqlite
-docs/creds.md
+
+# Local documentation
+/docs/
